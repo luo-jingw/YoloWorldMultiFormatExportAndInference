@@ -1,0 +1,200 @@
+CoreML Model Analysis Report
+============================================================
+Note: CoreML inference testing is only supported on macOS.
+This report contains model structure analysis only.
+============================================================
+
+Environment Information:
+- Python: 3.8.0
+- Platform: Linux
+- CoreMLTools: 8.3.0
+- PyTorch: 1.11.0+cu113
+
+
+============================================================
+CoreML Model Information: Text Encoder (coreML_models/text_encoder.mlpackage)
+============================================================
+
+Model Type: mlProgram
+
+Input Information (Total: 2):
+----------------------------------------
+Input 1:
+  Name: input_ids
+  Type: multiArrayType
+  Shape: [1, 77]
+  Data Type: 131104
+
+Input 2:
+  Name: attention_mask
+  Type: multiArrayType
+  Shape: [1, 77]
+  Data Type: 131104
+
+Output Information (Total: 1):
+----------------------------------------
+Output 1:
+  Name: text_feats
+  Type: multiArrayType
+  Shape: [1, 1, 512]
+  Data Type: 65568
+
+
+Model Statistics for Text Encoder:
+----------------------------------------
+Model file size: 0.00 MB
+User defined metadata:
+  com.github.apple.coremltools.source_dialect: TorchScript
+  com.github.apple.coremltools.version: 8.3.0
+  com.github.apple.coremltools.source: torch==1.11.0+cu113
+Minimum deployment target: 6
+
+============================================================
+CoreML Model Information: Visual Encoder (coreML_models/visual_encoder.mlpackage)
+============================================================
+
+Model Type: mlProgram
+
+Input Information (Total: 1):
+----------------------------------------
+Input 1:
+  Name: image
+  Type: multiArrayType
+  Shape: [1, 3, 640, 640]
+  Data Type: 65568
+
+Output Information (Total: 3):
+----------------------------------------
+Output 1:
+  Name: feat_0
+  Type: multiArrayType
+  Shape: [1, 320, 80, 80]
+  Data Type: 65568
+
+Output 2:
+  Name: feat_1
+  Type: multiArrayType
+  Shape: [1, 640, 40, 40]
+  Data Type: 65568
+
+Output 3:
+  Name: feat_2
+  Type: multiArrayType
+  Shape: [1, 640, 20, 20]
+  Data Type: 65568
+
+
+Model Statistics for Visual Encoder:
+----------------------------------------
+Model file size: 0.00 MB
+User defined metadata:
+  com.github.apple.coremltools.source_dialect: TorchScript
+  com.github.apple.coremltools.version: 8.3.0
+  com.github.apple.coremltools.source: torch==1.11.0+cu113
+Minimum deployment target: 6
+
+============================================================
+CoreML Model Information: Post Prediction (coreML_models/post_prediction.mlpackage)
+============================================================
+
+Model Type: mlProgram
+
+Input Information (Total: 5):
+----------------------------------------
+Input 1:
+  Name: feat_0
+  Type: multiArrayType
+  Shape: [1, 320, 80, 80]
+  Data Type: 65568
+
+Input 2:
+  Name: feat_1
+  Type: multiArrayType
+  Shape: [1, 640, 40, 40]
+  Data Type: 65568
+
+Input 3:
+  Name: feat_2
+  Type: multiArrayType
+  Shape: [1, 640, 20, 20]
+  Data Type: 65568
+
+Input 4:
+  Name: text_feats
+  Type: multiArrayType
+  Shape: [1, 1, 512]
+  Data Type: 65568
+
+Input 5:
+  Name: txt_masks
+  Type: multiArrayType
+  Shape: [1, 1]
+  Data Type: 65568
+
+Output Information (Total: 6):
+----------------------------------------
+Output 1:
+  Name: cls_score_0
+  Type: multiArrayType
+  Shape: [1, 1, 80, 80]
+  Data Type: 65568
+
+Output 2:
+  Name: cls_score_1
+  Type: multiArrayType
+  Shape: [1, 1, 40, 40]
+  Data Type: 65568
+
+Output 3:
+  Name: cls_score_2
+  Type: multiArrayType
+  Shape: [1, 1, 20, 20]
+  Data Type: 65568
+
+Output 4:
+  Name: bbox_pred_0
+  Type: multiArrayType
+  Shape: [1, 4, 80, 80]
+  Data Type: 65568
+
+Output 5:
+  Name: bbox_pred_1
+  Type: multiArrayType
+  Shape: [1, 4, 40, 40]
+  Data Type: 65568
+
+Output 6:
+  Name: bbox_pred_2
+  Type: multiArrayType
+  Shape: [1, 4, 20, 20]
+  Data Type: 65568
+
+
+Model Statistics for Post Prediction:
+----------------------------------------
+Model file size: 0.00 MB
+User defined metadata:
+  com.github.apple.coremltools.source_dialect: TorchScript
+  com.github.apple.coremltools.version: 8.3.0
+  com.github.apple.coremltools.source: torch==1.11.0+cu113
+Minimum deployment target: 6
+
+============================================================
+Summary
+============================================================
+Total models analyzed: 3
+Available models:
+  ✓ Text Encoder
+  ✓ Visual Encoder
+  ✓ Post Prediction
+
+Model deployment information:
+- CoreML models can be deployed on iOS, macOS, watchOS, and tvOS
+- Inference testing requires macOS 10.13 or later
+- Models use .mlpackage format for better organization
+- Optimized for Apple's Neural Engine when available
+
+Environment notes:
+- The warnings about 'libcoremlpython' are normal in non-macOS environments
+- These warnings don't affect model structure analysis
+- For full CoreML functionality, use macOS with proper Xcode tools

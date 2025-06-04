@@ -1,0 +1,6 @@
+!.gitignore
+saved_models/
+onnx_models/
+coreML_models/
+tflite_models/
+
