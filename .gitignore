@@ -1,4 +1,5 @@
 !.gitignore
+20250604_142731/
 saved_models/
 onnx_models/
 coreML_models/
