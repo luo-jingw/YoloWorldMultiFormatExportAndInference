@@ -274,5 +274,3 @@ For issues related to:
 - **Performance**: Review timing analysis outputs
 
 ---
-
-*This framework demonstrates the power of modular AI model deployment across multiple platforms and formats.*
