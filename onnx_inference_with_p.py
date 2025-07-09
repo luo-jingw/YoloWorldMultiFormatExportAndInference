@@ -31,7 +31,7 @@ def print_time_analysis():
 # Initialize ONNX Runtime sessions
 session_text = ort.InferenceSession("/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/onnx_models/text_encoder.onnx")
 session_visual = ort.InferenceSession("/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/onnx_models/visual_encoder.onnx")
-session_post = ort.InferenceSession("/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/onnx_models/post_prediction.onnx")
+session_post = ort.InferenceSession("/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/onnx_models/post_prediction_with_postp.onnx")
 
 tokenizer = CLIPTokenizer.from_pretrained("openai/clip-vit-base-patch32")
 TARGET_SIZE = (640, 640)
@@ -183,6 +183,49 @@ def custom_nms_filter(boxes, cls_probs,
     
     return final_boxes, final_scores, final_labels
 
+@timer
+def post_process_decoded_outputs(decoded_boxes, decoded_scores, image_rgb, 
+                               min_thresh=0.05, nms_thresh=0.5):
+    """处理包含解码的模型输出"""
+    from torchvision.ops import nms
+    
+    # 转换为torch tensor
+    boxes_tensor = torch.from_numpy(decoded_boxes).float()
+    scores_tensor = torch.from_numpy(decoded_scores).float()
+    
+    print(f"[INFO] Processing decoded outputs - boxes: {boxes_tensor.shape}, scores: {scores_tensor.shape}")
+    
+    # 过滤低置信度检测
+    valid_mask = scores_tensor > min_thresh
+    boxes_filtered = boxes_tensor[valid_mask]
+    scores_filtered = scores_tensor[valid_mask]
+    
+    print(f"[INFO] After filtering: {len(boxes_filtered)} boxes remaining")
+    
+    if len(boxes_filtered) == 0:
+        return torch.empty((0, 4)), torch.empty((0,)), torch.empty((0,), dtype=torch.long)
+    
+    # 应用NMS
+    keep = nms(boxes_filtered, scores_filtered, iou_threshold=nms_thresh)
+    final_boxes = boxes_filtered[keep]
+    final_scores = scores_filtered[keep]
+    final_labels = torch.zeros(len(final_boxes), dtype=torch.long)  # 单类别检测
+    
+    print(f"[INFO] After NMS: kept {len(final_boxes)} boxes")
+    
+    # 缩放到原始图像尺寸
+    if len(final_boxes) > 0:
+        H_orig, W_orig = image_rgb.shape[:2]
+        scale_x = W_orig / TARGET_SIZE[0]
+        scale_y = H_orig / TARGET_SIZE[1]
+        
+        print(f"[DEBUG] Scaling from {TARGET_SIZE} to {W_orig}x{H_orig} (scale_x={scale_x:.3f}, scale_y={scale_y:.3f})")
+        
+        final_boxes[:, [0, 2]] *= scale_x  # x坐标缩放
+        final_boxes[:, [1, 3]] *= scale_y  # y坐标缩放
+    
+    return final_boxes, final_scores, final_labels
+
 def detect_objects(image_path: str, text: str, save_path: str = "result_onnx_with_p.jpg"):
     """Main detection pipeline using ONNX with integrated decoding"""
     print(f"\nDetecting '{text}' in {image_path} using ONNX with integrated decoding")
@@ -225,71 +268,29 @@ def detect_objects(image_path: str, text: str, save_path: str = "result_onnx_wit
         }
     )
     
-    # 输出格式：[cls_sigmoid_0, cls_sigmoid_1, cls_sigmoid_2, bbox_decoded_0, bbox_decoded_1, bbox_decoded_2]
-    cls_outputs = post_outputs[:3]    # sigmoid后的分类分数
-    bbox_outputs = post_outputs[3:]   # 解码后的bbox坐标(TARGET_SIZE尺寸)
+    # 模型输出：[decoded_boxes, decoded_scores]
+    decoded_boxes = post_outputs[0]  # shape: [total_anchors, 4]
+    decoded_scores = post_outputs[1]  # shape: [total_anchors]
     
     timer.times['post_network_decode'].append(time.perf_counter() - start_post)
     
-    # 处理每个尺度的输出
+    # 处理解码后的输出
     start_nms = time.perf_counter()
-    all_boxes = []
-    all_cls_probs = []
-    
-    for level, (cls_score_np, bbox_pred_np) in enumerate(zip(cls_outputs, bbox_outputs)):
-        # 分类分数已经是sigmoid后的结果
-        cls_prob = torch.from_numpy(cls_score_np).float()[0].permute(1, 2, 0).reshape(-1, cls_score_np.shape[1])
-        all_cls_probs.append(cls_prob)
-        
-        # bbox已经是解码后的绝对坐标，形状为[1, 4, H, W]
-        bbox = torch.from_numpy(bbox_pred_np).float()[0]  # [4, H, W]
-        boxes = bbox.permute(1, 2, 0).reshape(-1, 4)  # [H*W, 4]
-        all_boxes.append(boxes)
-    
-    if not all_boxes:
-        final_boxes = torch.empty((0, 4))
-        final_scores = torch.empty((0,))
-        final_labels = torch.empty((0,), dtype=torch.long)
-    else:
-        all_boxes_tensor = torch.cat(all_boxes, dim=0)
-        all_cls_probs_tensor = torch.cat(all_cls_probs, dim=0)
-        
-        final_boxes, final_scores, final_labels = custom_nms_filter(
-            all_boxes_tensor, 
-            all_cls_probs_tensor,
-            min_thresh=MIN_THRESH,
-            norm_thresh=NORM_THRESH,
-            nms_thresh=NMS_IOU_THRESH
-        )
-    
-    timer.times['custom_nms'].append(time.perf_counter() - start_nms)
+    final_boxes, final_scores, final_labels = post_process_decoded_outputs(
+        decoded_boxes, decoded_scores, image_rgb,
+        min_thresh=MIN_THRESH, nms_thresh=NMS_IOU_THRESH
+    )
+    timer.times['post_processing'].append(time.perf_counter() - start_nms)
     
     # Results
     valid_detections = len(final_boxes)
     print(f"[INFO] Detected {valid_detections} objects using ONNX with integrated decoding")
     
-    # 将bbox从TARGET_SIZE缩放到原始图像尺寸
-    if valid_detections > 0:
-        H_orig, W_orig = image_rgb.shape[:2]
-        scale_x = W_orig / TARGET_SIZE[0]
-        scale_y = H_orig / TARGET_SIZE[1]
-        
-        print(f"[DEBUG] Scaling boxes from {TARGET_SIZE} to {W_orig}x{H_orig} (scale_x={scale_x:.3f}, scale_y={scale_y:.3f})")
-        
-        # 缩放bbox坐标到原图尺寸
-        final_boxes_scaled = final_boxes.clone()
-        final_boxes_scaled[:, [0, 2]] *= scale_x  # x坐标缩放
-        final_boxes_scaled[:, [1, 3]] *= scale_y  # y坐标缩放
-        
-        print(f"[DEBUG] Box scaling - before: {final_boxes[0].tolist()}, after: {final_boxes_scaled[0].tolist()}")
-    else:
-        final_boxes_scaled = final_boxes
-    
-    # Visualize (使用缩放后的坐标)
-    visualize(image_rgb, final_boxes_scaled.numpy(), final_scores.numpy(), 
+    # Visualize
+    visualize(image_rgb, final_boxes.numpy(), final_scores.numpy(), 
               final_labels.numpy(), [text], save_path)
     
-    return final_boxes_scaled, final_scores, final_labels
+    return final_boxes, final_scores, final_labels
 
 if __name__ == "__main__":
     image_path = "/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/sample_images/desk.png"  

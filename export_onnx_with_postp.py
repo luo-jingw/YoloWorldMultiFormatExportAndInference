@@ -83,49 +83,63 @@ class NeckHead(nn.Module):
         self.head_module = head_module
         self.target_size = 640
 
-    def _generate_anchors(self, H, W):
-        """Generate anchor points for decoding"""
-        stride = self.target_size / H
-        grid_y, grid_x = torch.meshgrid(
-            torch.arange(H, dtype=torch.float32), 
-            torch.arange(W, dtype=torch.float32), 
-            indexing="ij"
-        )
-        x_center = (grid_x + 0.5) * stride
-        y_center = (grid_y + 0.5) * stride
-        return x_center, y_center, stride
-
-    def _decode_bbox(self, bbox_pred, H, W):
-        """Decode bbox predictions to absolute coordinates"""
-        # bbox_pred shape: [1, 4, H, W]
-        bbox = bbox_pred[0]  # Remove batch dimension -> [4, H, W]
-        tx, ty, tr, tb = bbox[0], bbox[1], bbox[2], bbox[3]
+    def _decode_bboxes(self, cls_scores, bbox_preds):
+        """在模型内部进行bbox解码，返回解码后的坐标"""
+        all_boxes = []
+        all_scores = []
         
-        x_center, y_center, stride = self._generate_anchors(H, W)
+        for level, (cls_score, bbox_pred) in enumerate(zip(cls_scores, bbox_preds)):
+            # 应用sigmoid到分类分数
+            cls_prob = torch.sigmoid(cls_score)  # [1, C, H, W]
+            
+            # 解码边界框
+            bbox = bbox_pred[0]  # [4, H, W]
+            tx, ty, tr, tb = bbox[0], bbox[1], bbox[2], bbox[3]
+            H, W = tx.shape
+            stride = self.target_size / H  # 640 / H
+            
+            # 生成网格
+            grid_y, grid_x = torch.meshgrid(
+                torch.arange(H, dtype=torch.float32, device=bbox.device),
+                torch.arange(W, dtype=torch.float32, device=bbox.device),
+                indexing="ij"
+            )
+            x_center = (grid_x + 0.5) * stride
+            y_center = (grid_y + 0.5) * stride
+            
+            # 解码为绝对坐标
+            x1 = x_center - tx * stride
+            y1 = y_center - ty * stride
+            x2 = x_center + tr * stride
+            y2 = y_center + tb * stride
+            
+            # 重塑为 [H*W, 4]
+            boxes = torch.stack([x1, y1, x2, y2], dim=-1).reshape(-1, 4)
+            
+            # 重塑分类分数为 [H*W, C]
+            scores = cls_prob[0].permute(1, 2, 0).reshape(-1, cls_prob.shape[1])
+            
+            all_boxes.append(boxes)
+            all_scores.append(scores)
         
-        x1 = x_center - tx * stride
-        y1 = y_center - ty * stride
-        x2 = x_center + tr * stride
-        y2 = y_center + tb * stride
+        # 合并所有层级的结果
+        all_boxes = torch.cat(all_boxes, dim=0)    # [total_anchors, 4]
+        all_scores = torch.cat(all_scores, dim=0)  # [total_anchors, num_classes]
         
-        return torch.stack([x1, y1, x2, y2], dim=0)
+        # 对于单类别检测，取第一个类别的分数
+        final_scores = all_scores[:, 0]  # [total_anchors]
+        
+        return all_boxes, final_scores
 
     def forward(self, feat_0, feat_1, feat_2, text_feats, txt_masks):
         fused_feats = self.neck([feat_0, feat_1, feat_2], text_feats)
         cls_scores, bbox_preds = self.head_module(fused_feats, text_feats, txt_masks)
         
-        # Apply sigmoid to classification scores
-        cls_scores_sigmoid = [torch.sigmoid(cls_score) for cls_score in cls_scores]
+        # 在模型内部进行解码
+        decoded_boxes, decoded_scores = self._decode_bboxes(cls_scores, bbox_preds)
         
-        # Decode bbox predictions
-        decoded_bboxes = []
-        for i, bbox_pred in enumerate(bbox_preds):
-            B, C, H, W = bbox_pred.shape
-            decoded_bbox = self._decode_bbox(bbox_pred, H, W)
-            decoded_bboxes.append(decoded_bbox.unsqueeze(0))  # Add batch dimension
-        
-        return (cls_scores_sigmoid[0], cls_scores_sigmoid[1], cls_scores_sigmoid[2], 
-                decoded_bboxes[0], decoded_bboxes[1], decoded_bboxes[2])
+        # 返回解码后的结果：boxes [N, 4], scores [N]
+        return decoded_boxes, decoded_scores
 
 post_prediction = NeckHead(model.neck, model.bbox_head.head_module).eval()
 dummy_feat0 = torch.randn(1, 320, 80, 80)
@@ -159,7 +173,7 @@ with torch.no_grad():
         (dummy_feat0, dummy_feat1, dummy_feat2, dummy_text_feats, dummy_txt_masks),
         "/home/ljw/python_proj/computer_vision/YOLO-World/demo/YoloWorldMultiFormatExportAndInference/onnx_models/post_prediction_with_postp.onnx",
         input_names=["feat_0", "feat_1", "feat_2", "text_feats", "txt_masks"],
-        output_names=["cls_score_0", "cls_score_1", "cls_score_2", "bbox_pred_0", "bbox_pred_1", "bbox_pred_2"],
+        output_names=["decoded_boxes", "decoded_scores"],
         opset_version=12,
         do_constant_folding=True,
     )

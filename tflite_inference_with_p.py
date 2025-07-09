@@ -136,169 +136,72 @@ def preprocess_text(text):
 # Post-processing functions
 # ------------------------------------------------------------------------------
 @timer
-def post_process_with_decode(outputs: List[np.ndarray],
-                           image_rgb: np.ndarray,
-                           min_thresh: float = MIN_THRESH,
-                           norm_thresh: float = NORM_THRESH,
-                           nms_thresh: float = NMS_IOU_THRESH
-                           ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Post-processing for TFLite model with integrated decoding"""
+def post_process_decoded_outputs(outputs: List[np.ndarray],
+                                image_rgb: np.ndarray,
+                                min_thresh: float = MIN_THRESH,
+                                nms_thresh: float = NMS_IOU_THRESH
+                                ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """处理包含解码的TFLite模型输出"""
     
-    # 包含解码的模型输出格式：[boxes, scores, labels]
-    # 或者类似的已解码格式，需要根据实际模型输出调整
+    print(f"[INFO] Processing {len(outputs)} decoded outputs from TFLite model")
+    for i, output in enumerate(outputs):
+        print(f"  Output {i}: shape={output.shape}, dtype={output.dtype}")
+        if output.size > 0:
+            print(f"    Min/Max values: {output.min():.3f}/{output.max():.3f}")
     
-    # 假设模型输出是已经解码的boxes和scores
-    if len(outputs) == 3:
-        # 格式：[boxes, scores, labels] 或 [boxes, scores, valid_detections]
-        boxes_output = outputs[0]  # shape: (batch, max_detections, 4)
-        scores_output = outputs[1]  # shape: (batch, max_detections)
+    # 检查是否是2个输出（解码后的格式：boxes, scores）
+    if len(outputs) == 2:
+        print("[INFO] Using decoded outputs from model")
         
-        # 如果有第三个输出（可能是有效检测数量或标签）
-        if outputs[2].shape[-1] == 1:
-            # 第三个输出是有效检测数量
-            valid_detections = int(outputs[2][0, 0])
-            labels_output = np.zeros((1, scores_output.shape[1]), dtype=np.int64)
-        else:
-            # 第三个输出是标签
-            labels_output = outputs[2].astype(np.int64)
-            valid_detections = scores_output.shape[1]
-    else:
-        # 如果输出格式不同，回退到原始后处理
-        return post_process_reference(outputs, image_rgb, min_thresh, norm_thresh, nms_thresh)
-    
-    # 移除batch维度
-    boxes = boxes_output[0]      # shape: (max_detections, 4)
-    scores = scores_output[0]    # shape: (max_detections,)
-    labels = labels_output[0] if len(outputs) == 3 else np.zeros(scores.shape[0], dtype=np.int64)
-    
-    # 过滤低置信度检测
-    valid_mask = scores > min_thresh
-    boxes = boxes[valid_mask]
-    scores = scores[valid_mask]
-    labels = labels[valid_mask]
-    
-    # 转换为torch tensor
-    boxes_tensor = torch.from_numpy(boxes).float()
-    scores_tensor = torch.from_numpy(scores).float()
-    labels_tensor = torch.from_numpy(labels).long()
-    
-    # 应用NMS（如果模型内部没有应用）
-    if len(boxes_tensor) > 0:
+        boxes_output = outputs[0]    # [total_anchors, 4]
+        scores_output = outputs[1]   # [total_anchors]
+        
+        print(f"[INFO] Decoded boxes shape: {boxes_output.shape}")
+        print(f"[INFO] Decoded scores shape: {scores_output.shape}")
+        
+        # 过滤低置信度检测
+        valid_mask = scores_output > min_thresh
+        boxes = boxes_output[valid_mask]
+        scores = scores_output[valid_mask]
+        
+        print(f"[INFO] After filtering: {len(boxes)} boxes remaining")
+        
+        if len(boxes) == 0:
+            return torch.empty((0, 4)), torch.empty((0,)), torch.empty((0,), dtype=torch.long)
+        
+        # 转换为torch tensor
+        boxes_tensor = torch.from_numpy(boxes).float()
+        scores_tensor = torch.from_numpy(scores).float()
+        
+        # 应用NMS（在640x640坐标系下）
         keep = nms(boxes_tensor, scores_tensor, iou_threshold=nms_thresh)
         boxes_tensor = boxes_tensor[keep]
         scores_tensor = scores_tensor[keep]
-        labels_tensor = labels_tensor[keep]
+        
+        print(f"[INFO] After NMS: kept {len(boxes_tensor)} boxes")
+        
+        # 缩放到原始图像尺寸
+        if len(boxes_tensor) > 0:
+            H_orig, W_orig = image_rgb.shape[:2]
+            scale_x = W_orig / TARGET_SIZE[0]
+            scale_y = H_orig / TARGET_SIZE[1]
+            print(f"[INFO] Scale factors: x={scale_x:.3f}, y={scale_y:.3f}")
+            
+            boxes_tensor[:, [0, 2]] *= scale_x  # x1, x2
+            boxes_tensor[:, [1, 3]] *= scale_y  # y1, y2
+        
+        # 创建标签（单类别检测，所有标签都是0）
+        labels_tensor = torch.zeros(len(boxes_tensor), dtype=torch.long)
+        
+        return boxes_tensor, scores_tensor, labels_tensor
     
-    print(f"[INFO] After filtering and NMS: kept {len(boxes_tensor)} boxes")
-    
-    # 缩放boxes到原始图像尺寸
-    if len(boxes_tensor) > 0:
-        H_orig, W_orig = image_rgb.shape[:2]
-        scale_x = W_orig / TARGET_SIZE[0]
-        scale_y = H_orig / TARGET_SIZE[1]
-        boxes_tensor[:, [0, 2]] *= scale_x
-        boxes_tensor[:, [1, 3]] *= scale_y
-    
-    return boxes_tensor, scores_tensor, labels_tensor
-
-@timer
-def post_process_reference(outputs: List[np.ndarray],
-                         image_rgb: np.ndarray,
-                         min_thresh: float = MIN_THRESH,
-                         norm_thresh: float = NORM_THRESH,
-                         nms_thresh: float = NMS_IOU_THRESH
-                         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Reference post-processing implementation matching ONNX version"""
-    
-    # Reorder outputs to match ONNX format: [cls_20, cls_40, cls_80, bbox_20, bbox_40, bbox_80]
-    # TFLite outputs: [bbox_40, bbox_80, cls_80, bbox_20, cls_40, cls_20]
-    cls_20 = torch.from_numpy(outputs[5]).float()   # cls_20x20
-    cls_40 = torch.from_numpy(outputs[4]).float()   # cls_40x40
-    cls_80 = torch.from_numpy(outputs[2]).float()   # cls_80x80
-    bbox_20 = torch.from_numpy(outputs[3]).float()  # bbox_20x20
-    bbox_40 = torch.from_numpy(outputs[0]).float()  # bbox_40x40
-    bbox_80 = torch.from_numpy(outputs[1]).float()  # bbox_80x80
-    
-    cls_outputs = [cls_20, cls_40, cls_80]
-    bbox_outputs = [bbox_20, bbox_40, bbox_80]
-    
-    all_boxes = []
-    all_cls_probs = []
-    
-    for level, (cls_score, bbox_pred) in enumerate(zip(cls_outputs, bbox_outputs)):
-        # Compute sigmoid probability per class, reshape to (H*W, C)
-        cls_prob = torch.sigmoid(cls_score)[0].permute(1, 2, 0).reshape(-1, cls_score.shape[1])
-        all_cls_probs.append(cls_prob)
-
-        # Decode bounding boxes
-        bbox = bbox_pred[0]  # shape (4,H,W)
-        tx, ty, tr, tb = bbox[0], bbox[1], bbox[2], bbox[3]
-        H, W = tx.shape
-        stride = TARGET_SIZE[0] / H  # 640 / H
-
-        grid_y, grid_x = torch.meshgrid(torch.arange(H), torch.arange(W), indexing="ij")
-        x_center = (grid_x + 0.5) * stride
-        y_center = (grid_y + 0.5) * stride
-
-        x1 = x_center - tx * stride
-        y1 = y_center - ty * stride
-        x2 = x_center + tr * stride
-        y2 = y_center + tb * stride
-
-        boxes = torch.stack([x1, y1, x2, y2], dim=-1).reshape(-1, 4)  # shape (H*W, 4)
-        all_boxes.append(boxes)
-
-    if not all_boxes:
-        return (torch.empty((0,4)), torch.empty((0,)), torch.empty((0,), dtype=torch.long))
-
-    all_boxes_tensor     = torch.cat(all_boxes, dim=0)     # shape (T,4)
-    all_cls_probs_tensor = torch.cat(all_cls_probs, dim=0) # shape (T,C)
-
-    final_boxes  = []
-    final_scores = []
-    final_labels = []
-
-    num_classes = all_cls_probs_tensor.shape[1]
-    for cls_id in range(num_classes):
-        raw_scores = all_cls_probs_tensor[:, cls_id]
-        if raw_scores.max() < min_thresh:
-            continue
-
-        min_s, max_s = raw_scores.min(), raw_scores.max()
-        norm_scores = (raw_scores - min_s) / (max_s - min_s + 1e-6)
-        mask = norm_scores > norm_thresh
-        if mask.sum() == 0:
-            continue
-
-        boxes_cls  = all_boxes_tensor[mask]
-        scores_cls = raw_scores[mask]
-        keep = nms(boxes_cls, scores_cls, iou_threshold=nms_thresh)
-        final_boxes.append(boxes_cls[keep])
-        final_scores.append(scores_cls[keep])
-        final_labels.append(torch.full_like(scores_cls[keep], cls_id, dtype=torch.long))
-
-    if final_boxes:
-        final_boxes  = torch.cat(final_boxes, dim=0)
-        final_scores = torch.cat(final_scores, dim=0)
-        final_labels = torch.cat(final_labels, dim=0)
-        print(f"[INFO] After NMS: kept {final_boxes.shape[0]} boxes")
     else:
-        print("[WARN] No boxes passed filtering.")
-        final_boxes  = torch.empty((0, 4))
-        final_scores = torch.empty((0,))
-        final_labels = torch.empty((0,), dtype=torch.long)
+        print(f"[ERROR] Expected 2 outputs for decoded model, got {len(outputs)}")
+        return torch.empty((0, 4)), torch.empty((0,)), torch.empty((0,), dtype=torch.long)
 
-    # Scale boxes back to original image size
-    H_orig, W_orig = image_rgb.shape[:2]
-    scale_x = W_orig / TARGET_SIZE[0]
-    scale_y = H_orig / TARGET_SIZE[1]
-    scaled_boxes = final_boxes.clone()
-    if scaled_boxes.numel() > 0:
-        scaled_boxes[:, [0, 2]] *= scale_x
-        scaled_boxes[:, [1, 3]] *= scale_y
-
-    return scaled_boxes, final_scores, final_labels
-
+# ------------------------------------------------------------------------------
+# Visualization functions
+# ------------------------------------------------------------------------------
 @timer
 def visualize(image_rgb: np.ndarray,
              boxes: torch.Tensor,
@@ -311,35 +214,76 @@ def visualize(image_rgb: np.ndarray,
     H, W = img.shape[:2]
     font_scale = max(0.5, min(W, H) / 800 * 1.0)
     thickness = max(1, int(min(W, H) / 400))
+    
+    print(f"[DEBUG] Image dimensions: {W}x{H}")
+    print(f"[DEBUG] Processing {len(boxes)} boxes for visualization...")
 
-    for box, score, cls_id in zip(boxes, scores, labels):
-        x1, y1, x2, y2 = box.int().tolist()
+    valid_boxes = 0
+    for i, (box, score, cls_id) in enumerate(zip(boxes, scores, labels)):
+        x1, y1, x2, y2 = box.tolist()
+        print(f"[DEBUG] Box {i+1}: [{x1:.2f}, {y1:.2f}, {x2:.2f}, {y2:.2f}], score: {score:.3f}")
+        
+        # 检查bbox是否在图像范围内
+        if x1 >= W or y1 >= H or x2 <= 0 or y2 <= 0:
+            print(f"[WARN] Box {i+1} is completely outside image bounds, skipping...")
+            continue
+            
+        # 检查bbox是否有效
+        if x2 <= x1 or y2 <= y1:
+            print(f"[WARN] Box {i+1} has invalid dimensions, skipping...")
+            continue
+        
+        # 裁剪bbox到图像范围内
+        x1_clipped = max(0, min(int(x1), W-1))
+        y1_clipped = max(0, min(int(y1), H-1))
+        x2_clipped = max(0, min(int(x2), W-1))
+        y2_clipped = max(0, min(int(y2), H-1))
+        
+        # 如果裁剪后的bbox太小，跳过
+        if (x2_clipped - x1_clipped) < 2 or (y2_clipped - y1_clipped) < 2:
+            print(f"[WARN] Box {i+1} is too small after clipping, skipping...")
+            continue
+        
+        print(f"[DEBUG] Clipped box {i+1}: [{x1_clipped}, {y1_clipped}, {x2_clipped}, {y2_clipped}]")
+        
         label_text = f"{class_names[cls_id]} {score:.2f}"
-
-        # Draw bounding box
-        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), thickness)
+        
+        # 绘制边界框
+        cv2.rectangle(img, (x1_clipped, y1_clipped), (x2_clipped, y2_clipped), (0, 255, 0), thickness)
+        
+        # 绘制标签
         (text_w, text_h), baseline = cv2.getTextSize(
             label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
         )
-        # Draw background rectangle for text
+        
+        # 确保文本在图像范围内
+        text_y = max(text_h + baseline + 4, y1_clipped)
+        text_x = max(0, min(x1_clipped, W - text_w - 4))
+        
+        # 绘制文本背景
         cv2.rectangle(
             img,
-            (x1, y1 - text_h - baseline - 4),
-            (x1 + text_w + 4, y1),
+            (text_x, text_y - text_h - baseline - 4),
+            (text_x + text_w + 4, text_y),
             (0, 255, 0),
             -1
         )
-        # Draw text
+        
+        # 绘制文本
         cv2.putText(
             img,
             label_text,
-            (x1 + 2, y1 - baseline - 2),
+            (text_x + 2, text_y - baseline - 2),
             cv2.FONT_HERSHEY_SIMPLEX,
             font_scale,
             (0, 0, 0),
             thickness,
             cv2.LINE_AA
         )
+        
+        valid_boxes += 1
+    
+    print(f"[INFO] Drew {valid_boxes} valid boxes out of {len(boxes)} total boxes")
 
     cv2.imwrite(save_path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
     print(f"[INFO] Detection result saved as {save_path}")
@@ -347,7 +291,7 @@ def visualize(image_rgb: np.ndarray,
     plt.figure(figsize=(10, 8))
     plt.imshow(img)
     plt.axis("off")
-    plt.title("Detection Result")
+    plt.title(f"Detection Result - {valid_boxes} valid boxes")
     plt.show()
 
 # ------------------------------------------------------------------------------
@@ -355,7 +299,7 @@ def visualize(image_rgb: np.ndarray,
 # ------------------------------------------------------------------------------
 @timer
 def detect_objects(image_path: str, text: str, save_path: str = "result_tflite.jpg"):
-    """Main detection pipeline matching ONNX version structure"""
+    """Main detection pipeline with integrated decoding"""
     print(f"\n{'='*80}")
     print(f"TFLite Detection Pipeline (with integrated decoding)")
     print(f"Image: {image_path}")  
@@ -440,13 +384,12 @@ def detect_objects(image_path: str, text: str, save_path: str = "result_tflite.j
         
         timer.times['post_network'].append(time.perf_counter() - start_post)
         
-        # 5. Post-process decoded outputs
-        print("\n[Step 4] Post-processing decoded outputs...")
-        boxes, scores, labels = post_process_with_decode(
+        # 5. 处理解码后的输出
+        print("\n[Step 4] Processing decoded outputs...")
+        boxes, scores, labels = post_process_decoded_outputs(
             post_outputs,
             image_rgb,
             min_thresh=MIN_THRESH,
-            norm_thresh=NORM_THRESH,
             nms_thresh=NMS_IOU_THRESH
         )
         

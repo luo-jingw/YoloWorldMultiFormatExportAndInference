@@ -61,12 +61,12 @@ if __name__ == "__main__":
         tflite_path     = os.path.join(tflite_base_dir, "visual_encoder.tflite")
     )
 
-    # 3) 转换包含解码的post_prediction.onnx（与ONNX推理代码一致）
+    # 3) 转换post_prediction.onnx（不包含解码，与标准推理一致）
     convert_onnx_to_tflite(
-        onnx_path       = os.path.join(onnx_base_dir, "post_prediction.onnx"),
-        saved_model_dir = os.path.join(saved_base_dir, "post_prediction_with_decode"),
+        onnx_path       = os.path.join(onnx_base_dir, "post_prediction_with_postp.onnx"),
+        saved_model_dir = os.path.join(saved_base_dir, "post_prediction"),
         tflite_path     = os.path.join(tflite_base_dir, "post_prediction_with_decode.tflite")
     )
 
-    print("[INFO] TFLite conversion completed with integrated decoding.")
+    print("[INFO] TFLite conversion completed - using standard post-processing logic.")
 
