@@ -4,4 +4,7 @@ saved_models/
 onnx_models/
 coreML_models/
 tflite_models/
-
+configs/
+pretrained_weights/
+tflite_models_with_p/
+saved_models_with_p/
